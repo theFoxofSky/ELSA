@@ -36,6 +36,8 @@ def _cfg(url='', **kwargs):
 
 
 default_cfgs = {
+    'swin_large_patch4_window12_384': _cfg(url='', input_size=(3, 384, 384), crop_pct=1.0),
+    'swin_large_patch4_window7_224': _cfg(url='',),
     'swin_base_patch4_window7_224': _cfg(url='',),
     'swin_small_patch4_window7_224': _cfg(url='',),
     'swin_tiny_patch4_window7_224': _cfg(url='',),
@@ -159,6 +161,19 @@ class WindowAttention(nn.Module):
         x = self.proj_drop(x)
         return x
 
+    def flops(self, N):
+        # calculate flops for 1 window with token length of N
+        flops = 0
+        # qkv = self.qkv(x)
+        flops += N * self.dim * 3 * self.dim
+        # attn = (q @ k.transpose(-2, -1))
+        flops += self.num_heads * N * (self.dim // self.num_heads) * N
+        #  x = (attn @ v)
+        flops += self.num_heads * N * N * (self.dim // self.num_heads)
+        # x = self.proj(x)
+        flops += N * self.dim * self.dim
+        return flops
+
 
 class ELSASwinBlock(ELSABlock):
     """
@@ -180,6 +195,13 @@ class ELSASwinBlock(ELSABlock):
                          group_width=group_width, groups=groups,
                          **kwargs)
         self.input_resolution = input_resolution
+        self.kernel_size = kernel_size
+        self.groups = groups
+        self.groups_width = group_width
+        self.gamma = gamma
+        self.lam = lam
+        self.mlp_ratio = mlp_ratio
+
 
     def forward(self, x):
         H, W = self.input_resolution
@@ -188,6 +210,19 @@ class ELSASwinBlock(ELSABlock):
         x = x.view(B, H, W, C)
         x = super().forward(x)
         return x.view(B, H * W, C)
+
+    def flops(self):
+        flops = 0
+        H, W = self.input_resolution
+        # norm1
+        flops += self.dim * H * W
+        # elsa
+        flops += self.attn.flops(H * W)
+        # mlppre_proj
+        flops += 2 * H * W * self.dim * self.dim * self.mlp_ratio
+        # norm2
+        flops += self.dim * H * W
+        return flops
 
 
 class SwinTransformerBlock(nn.Module):
@@ -296,6 +331,20 @@ class SwinTransformerBlock(nn.Module):
         x = x + self.drop_path(self.mlp(self.norm2(x)))
 
         return x
+
+    def flops(self):
+        flops = 0
+        H, W = self.input_resolution
+        # norm1
+        flops += self.dim * H * W
+        # W-MSA/SW-MSA
+        nW = H * W / self.window_size / self.window_size
+        flops += nW * self.attn.flops(self.window_size * self.window_size)
+        # mlp
+        flops += 2 * H * W * self.dim * self.dim * self.mlp_ratio
+        # norm2
+        flops += self.dim * H * W
+        return flops
 
 
 class PatchMerging(nn.Module):
@@ -406,6 +455,14 @@ class BasicLayer(nn.Module):
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, depth={self.depth}"
 
+    def flops(self):
+        flops = 0
+        for blk in self.blocks:
+            flops += blk.flops()
+        if self.downsample is not None:
+            flops += self.downsample.flops()
+        return flops
+
 
 class ELSASwin(nn.Module):
     """
@@ -422,6 +479,9 @@ class ELSASwin(nn.Module):
 
         self.num_classes = num_classes
         self.num_layers = len(depths)
+        self.img_size = to_2tuple(img_size)
+        self.patch_size = to_2tuple(patch_size)
+        self.in_chans = in_chans
         self.embed_dim = embed_dim
         self.ape = ape
         self.patch_norm = patch_norm
@@ -514,6 +574,20 @@ class ELSASwin(nn.Module):
         x = self.head(x)
         return x
 
+    def flops(self):
+        flops = 0
+        # flops += self.patch_embed.flops()
+        # patch embed
+        Ho, Wo = (self.img_size[0] // self.patch_size[0], self.img_size[1] // self.patch_size[1])
+        flops += Ho * Wo * self.embed_dim * self.in_chans * (self.patch_size[0] * self.patch_size[1])
+        if self.patch_norm is not None:
+            flops += Ho * Wo * self.embed_dim
+        for i, layer in enumerate(self.layers):
+            flops += layer.flops()
+        flops += self.num_features * self.patch_grid[0] * self.patch_grid[1] // (2 ** self.num_layers)
+        flops += self.num_features * self.num_classes
+        return flops
+
 
 def _create_elsa_swin(variant, pretrained=False, default_cfg=None, **kwargs):
     if default_cfg is None:
@@ -572,6 +646,16 @@ def elsa_swin_large(pretrained=False, **kwargs):
     """ Swin-T @ 224x224, trained ImageNet-1k
     """
     model_kwargs = dict(
-        patch_size=4, window_size=7, embed_dim=192, depths=(2, 2, 18, 2), num_heads=(4, 8, 16, 32),
+        patch_size=4, window_size=7, embed_dim=192, depths=(2, 2, 18, 2), num_heads=(6, 12, 24, 48),
         **kwargs)
-    return _create_elsa_swin('swin_base_patch4_window7_224', pretrained=pretrained, **model_kwargs)
+    return _create_elsa_swin('swin_large_patch4_window7_224', pretrained=pretrained, **model_kwargs)
+
+
+@register_model
+def elsa_swin_large_384(pretrained=False, **kwargs):
+    """ Swin-T @ 224x224, trained ImageNet-1k
+    """
+    model_kwargs = dict(
+        patch_size=4, window_size=12, embed_dim=192, depths=(2, 2, 18, 2), num_heads=(6, 12, 24, 48),
+        **kwargs)
+    return _create_elsa_swin('swin_large_patch4_window12_384', pretrained=pretrained, **model_kwargs)

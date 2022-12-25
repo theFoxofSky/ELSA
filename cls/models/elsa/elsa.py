@@ -241,6 +241,15 @@ class ELSA(nn.Module):
         x = self.proj_drop(x)
         return x
 
+    def flops(self, N):
+        flops = 0
+        flops += self.dim * (2 * self.dim_qk + self.dim_v) * N
+        flops += self.kernel_size * self.kernel_size * self.group_width * self.dim_qk * N + \
+                 self.dim_qk * self.kernel_size ** 2 * self.num_heads * N
+        flops += self.dim_v * self.kernel_size ** 2 * N
+        flops += self.dim_v * self.dim * N
+        return flops
+
 
 class ELSABlock(nn.Module):
     """
