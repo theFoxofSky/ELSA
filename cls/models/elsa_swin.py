@@ -566,3 +566,12 @@ def elsa_swin_base(pretrained=False, **kwargs):
         **kwargs)
     return _create_elsa_swin('swin_base_patch4_window7_224', pretrained=pretrained, **model_kwargs)
 
+
+@register_model
+def elsa_swin_large(pretrained=False, **kwargs):
+    """ Swin-T @ 224x224, trained ImageNet-1k
+    """
+    model_kwargs = dict(
+        patch_size=4, window_size=7, embed_dim=192, depths=(2, 2, 18, 2), num_heads=(4, 8, 16, 32),
+        **kwargs)
+    return _create_elsa_swin('swin_base_patch4_window7_224', pretrained=pretrained, **model_kwargs)
