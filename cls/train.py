@@ -376,8 +376,7 @@ def main():
 
     if args.local_rank == 0:
         _logger.info('Model %s created, param count: %d' %
-                     (args.model, sum([m.numel()
-                                       for m in model.parameters()])))
+                     (args.model, sum([m.numel() for m in model.parameters()])))
         if hasattr(model, 'flops'):
             flops = model.flops()
             _logger.info(f"number of GFLOPs: {flops / 1e9}")
