@@ -18,7 +18,7 @@ from timm.models.layers import PatchEmbed, Mlp, DropPath, to_2tuple, trunc_norma
 from timm.models.registry import register_model
 from timm.models.vision_transformer import checkpoint_filter_fn, _init_vit_weights
 
-from .elsa import ELSABlock
+from .elsa import ELSABlock, LayerNorm2d
 
 
 _logger = logging.getLogger(__name__)
@@ -182,34 +182,18 @@ class ELSASwinBlock(ELSABlock):
     def __init__(self, dim, kernel_size, input_resolution,
                  stride=1, num_heads=1, mlp_ratio=3.,
                  drop=0., attn_drop=0., drop_path=0.,
-                 act_layer=nn.GELU, norm_layer=nn.LayerNorm,
+                 act_layer=nn.GELU, norm_layer=None,
                  qkv_bias=False, qk_scale=1, dim_qk=None, dim_v=None,
                  lam=0, gamma=1, dilation=1, group_width=8, groups=1,
                  **kwargs):
         super().__init__(dim, kernel_size, stride,
                          num_heads, mlp_ratio,
                          drop, attn_drop, drop_path,
-                         act_layer, norm_layer,
-                         qkv_bias, qk_scale=qk_scale, dim_qk=dim_qk, dim_v=dim_v,
+                         act_layer, qkv_bias, qk_scale=qk_scale, dim_qk=dim_qk, dim_v=dim_v,
                          lam=lam, gamma=gamma, dilation=dilation,
                          group_width=group_width, groups=groups,
                          **kwargs)
         self.input_resolution = input_resolution
-        self.kernel_size = kernel_size
-        self.groups = groups
-        self.groups_width = group_width
-        self.gamma = gamma
-        self.lam = lam
-        self.mlp_ratio = mlp_ratio
-
-
-    def forward(self, x):
-        H, W = self.input_resolution
-        B, L, C = x.shape
-        assert L == H * W, "input feature has wrong size"
-        x = x.view(B, H, W, C)
-        x = super().forward(x)
-        return x.view(B, H * W, C)
 
     def flops(self):
         flops = 0
@@ -347,7 +331,7 @@ class SwinTransformerBlock(nn.Module):
         return flops
 
 
-class PatchMerging(nn.Module):
+class PatchMerging2d(nn.Module):
     r""" Patch Merging Layer.
 
     Args:
@@ -367,19 +351,15 @@ class PatchMerging(nn.Module):
         """
         x: B, H*W, C
         """
-        H, W = self.input_resolution
-        B, L, C = x.shape
-        assert L == H * W, "input feature has wrong size"
+        h, w = self.input_resolution
+        B, C, H, W = x.shape
+        assert H == h and W == w, "input feature has wrong size"
         assert H % 2 == 0 and W % 2 == 0, f"x size ({H}*{W}) are not even."
-
-        x = x.view(B, H, W, C)
-
-        x0 = x[:, 0::2, 0::2, :]  # B H/2 W/2 C
-        x1 = x[:, 1::2, 0::2, :]  # B H/2 W/2 C
-        x2 = x[:, 0::2, 1::2, :]  # B H/2 W/2 C
-        x3 = x[:, 1::2, 1::2, :]  # B H/2 W/2 C
-        x = torch.cat([x0, x1, x2, x3], -1)  # B H/2 W/2 4*C
-        x = x.view(B, -1, 4 * C)  # B H/2*W/2 4*C
+        x0 = x[:, :, 0::2, 0::2]  # B C H/2 W/2
+        x1 = x[:, :, 1::2, 0::2]  # B C H/2 W/2
+        x2 = x[:, :, 0::2, 1::2]  # B C H/2 W/2
+        x3 = x[:, :, 1::2, 1::2]  # B C H/2 W/2
+        x = torch.cat([x0, x1, x2, x3], 1)  # B 4*C H/2 W/2
 
         x = self.norm(x)
         x = self.reduction(x)
@@ -418,13 +398,15 @@ class BasicLayer(nn.Module):
     def __init__(self, dim, input_resolution, depth, num_heads, window_size,
                  mlp_ratio=4., qkv_bias=True, drop=0., attn_drop=0., elsa_kernel=7,
                  drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False,
-                 block=SwinTransformerBlock, group_width=8, lam=0, gamma=1, **kwargs):
+                 block=SwinTransformerBlock, group_width=8, lam=0, gamma=1,
+                 bchw2bnc=False, **kwargs):
 
         super().__init__()
         self.dim = dim
         self.input_resolution = input_resolution
         self.depth = depth
         self.use_checkpoint = use_checkpoint
+        self.bchw2bnc = bchw2bnc
 
         # build blocks
         self.blocks = nn.ModuleList([
@@ -443,6 +425,9 @@ class BasicLayer(nn.Module):
             self.downsample = None
 
     def forward(self, x):
+        if self.bchw2bnc:
+            B, C, H, W = x.shape
+            x = x.permute(0, 2, 3, 1).reshape(B, H*W, C)
         for blk in self.blocks:
             if not torch.jit.is_scripting() and self.use_checkpoint:
                 x = checkpoint.checkpoint(blk, x)
@@ -491,13 +476,13 @@ class ELSASwin(nn.Module):
         # split image into non-overlapping patches
         self.patch_embed = PatchEmbed(
             img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim,
-            norm_layer=norm_layer if self.patch_norm else None)
+            norm_layer=LayerNorm2d if self.patch_norm else None, flatten=False)
         num_patches = self.patch_embed.num_patches
         self.patch_grid = self.patch_embed.grid_size
 
         # absolute position embedding
         if self.ape:
-            self.absolute_pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
+            self.absolute_pos_embed = nn.Parameter(torch.zeros(1, num_patches, *self.patch_grid))
             trunc_normal_(self.absolute_pos_embed, std=.02)
         else:
             self.absolute_pos_embed = None
@@ -522,13 +507,14 @@ class ELSASwin(nn.Module):
                 drop=drop_rate,
                 attn_drop=attn_drop_rate,
                 drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
-                norm_layer=norm_layer,
+                norm_layer=LayerNorm2d if i_layer < self.num_layers-1 else norm_layer,
                 downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
                 use_checkpoint=use_checkpoint,
                 elsa_kernel=elsa_kernel,
                 group_width=group_width,
                 lam=lam,
                 gamma=gamma,
+                bchw2bnc=(i_layer == (self.num_layers-1)),
                 **kwargs)
             ]
         self.layers = nn.Sequential(*layers)

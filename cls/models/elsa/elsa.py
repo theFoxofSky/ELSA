@@ -204,15 +204,15 @@ class ELSA(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, x, mask=None):
-        B, H, W, _ = x.shape
         C = self.dim_v
         ks = self.kernel_size
         G = self.num_heads
-        x = x.permute(0, 3, 1, 2)  # B, C, H, W
+        B, _, H, W = x.shape
 
         qkv = self.pre_proj(x)
 
         q, k, v = torch.split(qkv, (self.dim_qk, self.dim_qk, self.dim_v), dim=1)
+
         hadamard_product = q * k * self.scale
 
         if self.stride > 1:
@@ -237,7 +237,7 @@ class ELSA(nn.Module):
         x = elsa_op(v, ghost_mul, ghost_add, h_attn, self.lam, self.gamma,
                     self.kernel_size, self.dilation, self.stride)
         x = x.reshape(B, C, H // self.stride, W // self.stride)
-        x = self.post_proj(x.permute(0, 2, 3, 1))  # B, H, W, C
+        x = self.post_proj(x)  # B, H, W, C
         x = self.proj_drop(x)
         return x
 
@@ -251,6 +251,51 @@ class ELSA(nn.Module):
         return flops
 
 
+# input size must be B, C, H, W
+class LayerNorm2d(nn.Module):
+    def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True):
+        super(LayerNorm2d, self).__init__()
+        print('WARNING: You enabled FastLayerNorm2d. '
+              'All input should be in (B, C, H, W) form. '
+              'Only C will be normalized.')
+        self.normalized_shape = normalized_shape
+        self.eps = eps
+        self.elementwise_affine = elementwise_affine
+
+        if self.elementwise_affine:
+            self.weight = nn.Parameter(torch.ones(1, self.normalized_shape, 1, 1))
+            self.bias = nn.Parameter(torch.zeros(1, self.normalized_shape, 1, 1))
+        else:
+            self.register_parameter('weight', None)
+            self.register_parameter('bias', None)
+
+    def forward(self, x):
+        return (x - x.mean(1)[:, None, :, :]) * self.weight / \
+               (x.var(1)[:, None, :, :] + self.eps)**0.5 +\
+               self.bias
+
+
+class Mlp2d(nn.Module):
+    """ MLP as used in Vision Transformer, MLP-Mixer and related networks
+    """
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.fc1 = nn.Conv2d(in_features, hidden_features, 1)
+        self.act = act_layer()
+        self.fc2 = nn.Conv2d(hidden_features, out_features, 1)
+        self.drop = nn.Dropout(drop)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.drop(x)
+        return x
+
+
 class ELSABlock(nn.Module):
     """
     Implementation of ELSA block: including ELSA + MLP
@@ -258,14 +303,15 @@ class ELSABlock(nn.Module):
     def __init__(self, dim, kernel_size,
                  stride=1, num_heads=1, mlp_ratio=3.,
                  drop=0., attn_drop=0., drop_path=0.,
-                 act_layer=nn.GELU, norm_layer=nn.LayerNorm,
+                 act_layer=nn.GELU,
                  qkv_bias=False, qk_scale=1, dim_qk=None, dim_v=None,
                  lam=1, gamma=1, dilation=1, group_width=8, groups=1,
                  **kwargs):
         super().__init__()
         assert stride == 1
         self.dim = dim
-        self.norm1 = norm_layer(dim)
+
+        self.norm1 = LayerNorm2d(dim)
         self.attn = ELSA(dim, num_heads, dim_qk=dim_qk, dim_v=dim_v, kernel_size=kernel_size,
                          stride=stride, dilation=dilation,
                          qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop,
@@ -274,12 +320,13 @@ class ELSABlock(nn.Module):
         self.drop_path = DropPath(
             drop_path) if drop_path > 0. else nn.Identity()
 
-        self.norm2 = norm_layer(dim)
+        self.norm2 = LayerNorm2d(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim,
-                       hidden_features=mlp_hidden_dim,
-                       act_layer=act_layer,
-                       drop=drop)
+
+        self.mlp = Mlp2d(in_features=dim,
+                         hidden_features=mlp_hidden_dim,
+                         act_layer=act_layer,
+                         drop=drop)
 
     def forward(self, x):
         x = x + self.drop_path(self.attn(self.norm1(x)))
