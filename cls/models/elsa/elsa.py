@@ -200,7 +200,7 @@ class ELSA(nn.Module):
             self.ghost_head = None
 
         self.attn_drop = nn.Dropout(attn_drop)
-        self.post_proj = nn.Linear(self.dim_v, dim)
+        self.post_proj = nn.Conv2d(self.dim_v, dim, 1)
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, x, mask=None):
