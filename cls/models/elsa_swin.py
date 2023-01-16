@@ -340,12 +340,12 @@ class PatchMerging2d(nn.Module):
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
 
-    def __init__(self, input_resolution, dim, norm_layer=nn.LayerNorm):
+    def __init__(self, input_resolution, dim):
         super().__init__()
         self.input_resolution = input_resolution
         self.dim = dim
-        self.reduction = nn.Linear(4 * dim, 2 * dim, bias=False)
-        self.norm = norm_layer(4 * dim)
+        self.reduction = nn.Conv2d(4 * dim, 2 * dim, 1, bias=False)
+        self.norm = LayerNorm2d(4 * dim)
 
     def forward(self, x):
         """
@@ -420,7 +420,7 @@ class BasicLayer(nn.Module):
 
         # patch merging layer
         if downsample is not None:
-            self.downsample = downsample(input_resolution, dim=dim, norm_layer=norm_layer)
+            self.downsample = downsample(input_resolution, dim=dim)
         else:
             self.downsample = None
 
@@ -508,7 +508,7 @@ class ELSASwin(nn.Module):
                 attn_drop=attn_drop_rate,
                 drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
                 norm_layer=LayerNorm2d if i_layer < self.num_layers-1 else norm_layer,
-                downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
+                downsample=PatchMerging2d if (i_layer < self.num_layers - 1) else None,
                 use_checkpoint=use_checkpoint,
                 elsa_kernel=elsa_kernel,
                 group_width=group_width,

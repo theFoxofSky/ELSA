@@ -138,7 +138,7 @@ def elsa_op(features, ghost_mul, ghost_add, h_attn, lam, gamma,
     else:
         B, C, H, W = features.shape
         _pad = kernel_size // 2 * dilation
-        features = Function.unfold(
+        features = F.unfold(
             features, kernel_size=kernel_size, dilation=dilation, padding=_pad, stride=stride) \
             .reshape(B, C, kernel_size ** 2, H * W)
         ghost_mul = ghost_mul.reshape(B, C, kernel_size ** 2, 1)
@@ -255,7 +255,7 @@ class ELSA(nn.Module):
 class LayerNorm2d(nn.Module):
     def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True):
         super(LayerNorm2d, self).__init__()
-        print('WARNING: You enabled FastLayerNorm2d. '
+        print('WARNING: You enabled LayerNorm2d. '
               'All input should be in (B, C, H, W) form. '
               'Only C will be normalized.')
         self.normalized_shape = normalized_shape

@@ -3,4 +3,4 @@ mmpycocotools
 numpy
 six
 terminaltables
-timm==0.4.9
+timm
